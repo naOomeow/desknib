@@ -94,7 +94,7 @@ impl Scene {
 pub fn to_bgra(canvas: &Pixmap, out: &mut Vec<u8>) {
     out.clear();
     out.reserve(canvas.data().len());
-    for px in canvas.data().chunks_exact(4) {
+    for px in canvas.data().as_chunks::<4>().0 {
         out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
     }
 }
