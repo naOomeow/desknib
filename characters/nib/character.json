@@ -1,0 +1,13 @@
+{
+  "name": "Nib",
+  "author": "desknib contributors",
+  "license": "CC-BY-4.0",
+  "scale": 1.0,
+  "bubble_anchor": [84, 40],
+  "animations": {
+    "idle": { "file": "idle.png", "frames": 8, "fps": 6 },
+    "sit": { "file": "sit.png", "frames": 4, "fps": 3 },
+    "sleep": { "file": "sleep.png", "frames": 4, "fps": 2 },
+    "dance": { "file": "dance.png", "frames": 8, "fps": 10 }
+  }
+}
