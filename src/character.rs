@@ -189,7 +189,7 @@ impl Character {
             .expect("idle animation exists")
     }
 
-    #[allow(dead_code)] // behaviour states arrive in Milestone 2
+    #[allow(dead_code)] // wanted once custom characters get a loader UI
     pub fn has_animation(&self, name: &str) -> bool {
         self.animations.contains_key(name)
     }

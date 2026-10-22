@@ -8,16 +8,17 @@ focus stealing, and clicks pass straight through everything except the pet.
 
 ## Status
 
-Nib idles on the desktop, talks in chat bubbles, and shows your real desktop
-notifications as bubbles instead of popups. Linux (X11 and XWayland) first;
-Windows comes later.
+Nib idles on the desktop, talks in chat bubbles, shows your real desktop
+notifications as bubbles instead of popups, and sits down then sleeps when
+you step away from the desk. Linux (X11 and XWayland) first; Windows comes
+later.
 
 | Milestone | What | State |
 | --- | --- | --- |
 | 1 | Transparent always-on-top pet, idle animation, click bubble, drag, tray | done |
 | 2 | Desktop notifications shown as bubbles instead of popups | done |
-| 3 | Sit, stretch and sleep driven by desk idle time | next |
-| 4 | Dance while music or video plays (MPRIS) | planned |
+| 3 | Sit, stretch and sleep driven by desk idle time | done |
+| 4 | Dance while music or video plays (MPRIS) | next |
 | 5 | Character pack loader UI, more characters | planned |
 
 ## Run
@@ -70,6 +71,17 @@ the pet is hidden.
 To try the "desktop keeps the service" path without a real second
 notification daemon, run `cargo run --example fake_daemon` in one terminal
 (it just grabs the name and sits there) before starting desknib in another.
+
+## Sitting and sleeping
+
+Nib watches how long it has been since any keyboard or mouse input anywhere
+on the desktop (via X11's MIT-SCREEN-SAVER extension, checked every 5
+seconds — not every frame, since it costs a round trip to the X server).
+Idle 2 minutes and Nib sits down; idle 10 minutes and Nib lies down and
+sleeps. Any real input wakes it immediately, with a short "Mmm, I'm up."
+bubble. On the rare X server without MIT-SCREEN-SAVER, sitting and sleeping
+are simply disabled and Nib stays in its idle animation; everything else
+still works.
 
 ## Character packs
 

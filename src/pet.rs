@@ -64,7 +64,6 @@ impl Pet {
         }
     }
 
-    #[allow(dead_code)] // behaviour states arrive in Milestone 2
     pub fn set_animation(&mut self, name: &str, frame_count: usize, fps: f32, now: Instant) {
         if self.animation == name {
             return;

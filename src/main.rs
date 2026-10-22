@@ -1,3 +1,4 @@
+mod behavior;
 mod bubble;
 mod character;
 mod inbox;
@@ -10,8 +11,9 @@ mod x11;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use behavior::BehaviorTracker;
 use bubble::Bubble;
 use character::Character;
 use inbox::Inbox;
@@ -141,9 +143,46 @@ fn run(opts: Options) -> x11::Result<()> {
     let mut visible = true;
     let mut synced = (pet.quiet, !visible);
 
+    // Desk idle time drives sitting and sleeping. Checked every few seconds,
+    // not every frame, since it costs a round trip to the X server; `None`
+    // once means the extension is missing, so the check stops for good
+    // instead of erroring every loop.
+    let mut behavior = BehaviorTracker::default();
+    const IDLE_CHECK_EVERY: Duration = Duration::from_secs(5);
+    let mut next_idle_check = now;
+    let mut idle_supported = true;
+
     loop {
         let now = Instant::now();
         dirty |= pet.tick(now);
+
+        if idle_supported && now >= next_idle_check {
+            next_idle_check = now + IDLE_CHECK_EVERY;
+            match window.idle_time() {
+                Ok(Some(idle)) => {
+                    if let Some(change) = behavior.sample(idle) {
+                        let anim = character.animation(change.animation);
+                        pet.set_animation(change.animation, anim.frames.len(), anim.fps, now);
+                        if change.woke_up {
+                            pet.say(Bubble::text("Mmm, I'm up."), false, now);
+                        }
+                        dirty = true;
+                    }
+                }
+                Ok(None) => {
+                    eprintln!(
+                        "desknib: no idle-time extension on this X server; sitting and sleeping are disabled"
+                    );
+                    idle_supported = false;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "desknib: could not read idle time ({e}); sitting and sleeping are disabled"
+                    );
+                    idle_supported = false;
+                }
+            }
+        }
         if let Some(id) = pet.take_expired_notification() {
             alerts.finish(id, CloseReason::Expired, &mut pet, now);
             dirty = true;
@@ -180,11 +219,14 @@ fn run(opts: Options) -> x11::Result<()> {
         }
 
         // While hidden, only the tray can wake us, so poll it about once a second.
-        let deadline = if visible {
+        let mut deadline = if visible {
             pet.next_deadline(now)
         } else {
             now + std::time::Duration::from_secs(1)
         };
+        if idle_supported {
+            deadline = deadline.min(next_idle_check);
+        }
         for event in window.wait_events(deadline)? {
             let now = Instant::now();
             match event {
