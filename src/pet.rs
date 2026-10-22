@@ -15,6 +15,7 @@ const CLICK_LINES: &[&str] = &[
 /// How long the pet waits between redraws when nothing animates.
 const IDLE_WAKE: Duration = Duration::from_secs(1);
 const QUIT_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
+const CRITICAL_BUBBLE_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -26,6 +27,8 @@ pub enum Action {
 pub struct ActiveBubble {
     pub bubble: Bubble,
     pub until: Instant,
+    /// Set when the bubble shows a desktop notification.
+    pub notification: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -40,6 +43,8 @@ pub struct Pet {
     pub quiet: bool,
     click_count: usize,
     quit_armed_until: Option<Instant>,
+    /// A notification bubble that timed out, for the caller to report.
+    expired_notification: Option<u32>,
 }
 
 impl Pet {
@@ -55,6 +60,7 @@ impl Pet {
             quiet: false,
             click_count: 0,
             quit_armed_until: None,
+            expired_notification: None,
         }
     }
 
@@ -68,6 +74,7 @@ impl Pet {
             quiet: self.quiet,
             click_count: self.click_count,
             quit_armed_until: self.quit_armed_until,
+            expired_notification: self.expired_notification,
             ..Pet::new(name, frame_count, fps, now)
         };
     }
@@ -85,7 +92,9 @@ impl Pet {
             changed = true;
         }
         if self.bubble.as_ref().is_some_and(|b| now >= b.until) {
-            self.bubble = None;
+            if let Some(id) = self.bubble.take().and_then(|b| b.notification) {
+                self.expired_notification = Some(id);
+            }
             changed = true;
         }
         if self.quit_armed_until.is_some_and(|t| now >= t) {
@@ -117,8 +126,45 @@ impl Pet {
             return false;
         }
         let until = now + Duration::from_millis(bubble.duration_ms());
-        self.bubble = Some(ActiveBubble { bubble, until });
+        self.bubble = Some(ActiveBubble {
+            bubble,
+            until,
+            notification: None,
+        });
         true
+    }
+
+    /// Shows a notification. It replaces any chatter on screen; critical
+    /// ones stay up until clicked, within reason.
+    pub fn show_notification(&mut self, bubble: Bubble, id: u32, critical: bool, now: Instant) {
+        let ms = if critical {
+            CRITICAL_BUBBLE_MS
+        } else {
+            bubble.duration_ms() + 1000
+        };
+        let until = now + Duration::from_millis(ms);
+        self.bubble = Some(ActiveBubble {
+            bubble,
+            until,
+            notification: Some(id),
+        });
+    }
+
+    /// The notification currently on screen, if any.
+    pub fn notification_on_screen(&self) -> Option<u32> {
+        self.bubble.as_ref().and_then(|b| b.notification)
+    }
+
+    /// Removes a notification bubble, leaving chatter alone.
+    pub fn clear_notification(&mut self) {
+        if self.notification_on_screen().is_some() {
+            self.bubble = None;
+        }
+    }
+
+    /// The notification whose bubble timed out since the last call.
+    pub fn take_expired_notification(&mut self) -> Option<u32> {
+        self.expired_notification.take()
     }
 
     pub fn on_click(&mut self, now: Instant) {
@@ -279,6 +325,47 @@ mod tests {
         pet.set_animation("dance", 8, 10.0, t0 + ms(200));
         assert_eq!((pet.animation.as_str(), pet.frame), ("dance", 0));
         assert!(pet.bubble.is_some());
+    }
+
+    #[test]
+    fn notification_bubble_reports_its_expiry_once() {
+        let t0 = Instant::now();
+        let mut pet = Pet::new("idle", 1, 1.0, t0);
+        pet.show_notification(Bubble::text("hi"), 42, false, t0);
+        assert_eq!(pet.notification_on_screen(), Some(42));
+        assert!(pet.tick(t0 + ms(4000)));
+        assert_eq!(pet.take_expired_notification(), Some(42));
+        assert_eq!(pet.take_expired_notification(), None);
+    }
+
+    #[test]
+    fn chatter_expiry_is_not_a_notification() {
+        let t0 = Instant::now();
+        let mut pet = Pet::new("idle", 1, 1.0, t0);
+        pet.say(Bubble::text("hi"), true, t0);
+        pet.tick(t0 + ms(4000));
+        assert_eq!(pet.take_expired_notification(), None);
+    }
+
+    #[test]
+    fn critical_notifications_stay_longer() {
+        let t0 = Instant::now();
+        let mut pet = Pet::new("idle", 1, 1.0, t0);
+        pet.show_notification(Bubble::text("Battery low"), 1, true, t0);
+        pet.tick(t0 + ms(20_000));
+        assert_eq!(pet.notification_on_screen(), Some(1));
+    }
+
+    #[test]
+    fn clearing_leaves_chatter_alone() {
+        let t0 = Instant::now();
+        let mut pet = Pet::new("idle", 1, 1.0, t0);
+        pet.say(Bubble::text("hi"), true, t0);
+        pet.clear_notification();
+        assert!(pet.bubble.is_some());
+        pet.show_notification(Bubble::text("n"), 5, false, t0);
+        pet.clear_notification();
+        assert!(pet.bubble.is_none());
     }
 
     #[test]

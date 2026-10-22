@@ -1,5 +1,7 @@
 mod bubble;
 mod character;
+mod inbox;
+mod notify;
 mod pet;
 mod scene;
 mod tray;
@@ -12,6 +14,8 @@ use std::time::Instant;
 
 use bubble::Bubble;
 use character::Character;
+use inbox::Inbox;
+use notify::{CloseReason, Notifier};
 use pet::{Action, Gesture, GestureEvent, Pet};
 use scene::Scene;
 use x11::{PetWindow, WindowEvent};
@@ -96,9 +100,27 @@ fn run(opts: Options) -> x11::Result<()> {
     let mut scene = Scene::new(&character);
     let mut window = PetWindow::open(scene.width, scene.height)?;
 
+    let (note_tx, note_rx) = mpsc::channel();
+    let (mode, notifier) = match notify::start(note_tx) {
+        Ok((mode, notifier)) => (Some(mode), notifier),
+        Err(e) => {
+            eprintln!("desknib: notifications unavailable ({e})");
+            (None, Notifier::none())
+        }
+    };
+    if mode == Some(notify::Mode::Listening) {
+        eprintln!(
+            "desknib: the desktop keeps its own notification service; turn its popups off to avoid seeing both"
+        );
+    }
+    let mut alerts = Alerts {
+        inbox: Inbox::default(),
+        notifier,
+    };
+
     let (tx, rx) = mpsc::channel();
     let idle = character.animation("idle");
-    let tray = match tray::spawn(tx, &idle.frames[0], opts.quiet) {
+    let tray = match tray::spawn(tx, &idle.frames[0], opts.quiet, mode) {
         Ok(t) => Some(t),
         Err(e) => {
             eprintln!("desknib: no tray icon ({e}); right-click the pet twice to quit");
@@ -117,25 +139,36 @@ fn run(opts: Options) -> x11::Result<()> {
     let mut gesture = Gesture::default();
     let mut dirty = true;
     let mut visible = true;
+    let mut synced = (pet.quiet, !visible);
 
     loop {
         let now = Instant::now();
         dirty |= pet.tick(now);
+        if let Some(id) = pet.take_expired_notification() {
+            alerts.finish(id, CloseReason::Expired, &mut pet, now);
+            dirty = true;
+        }
+
+        while let Ok(event) = note_rx.try_recv() {
+            let holding = pet.quiet || !visible;
+            dirty |= alerts.receive(event, holding, &mut pet, now);
+        }
 
         while let Ok(cmd) = rx.try_recv() {
+            let was_holding = pet.quiet || !visible;
             match cmd {
-                tray::Command::SayHi => {
-                    pet.on_click(now);
-                    dirty = true;
-                }
+                tray::Command::SayHi => pet.on_click(now),
                 tray::Command::SetQuiet(q) => pet.quiet = q,
                 tray::Command::SetHidden(h) => {
                     visible = !h;
                     window.set_visible(visible)?;
-                    dirty = true;
                 }
                 tray::Command::Quit => return Ok(()),
             }
+            if was_holding && !(pet.quiet || !visible) {
+                alerts.catch_up(&mut pet, now);
+            }
+            dirty = true;
         }
 
         if dirty && visible {
@@ -169,7 +202,10 @@ fn run(opts: Options) -> x11::Result<()> {
                 }
                 WindowEvent::Release { button: 1 } => {
                     if gesture.release() == GestureEvent::Click {
-                        pet.on_click(now);
+                        match pet.notification_on_screen() {
+                            Some(id) => alerts.clicked(id, &mut pet, now),
+                            None => pet.on_click(now),
+                        }
                         dirty = true;
                     }
                 }
@@ -179,8 +215,94 @@ fn run(opts: Options) -> x11::Result<()> {
         }
         if let Some(t) = &tray {
             // Keep the tray's checkmarks in sync with changes made elsewhere.
-            t.set_quiet(pet.quiet);
-            t.set_hidden(!visible);
+            if synced != (pet.quiet, !visible) {
+                synced = (pet.quiet, !visible);
+                t.set_quiet(pet.quiet);
+                t.set_hidden(!visible);
+            }
+        }
+    }
+}
+
+/// Desktop notifications on their way to bubbles.
+struct Alerts {
+    inbox: Inbox,
+    notifier: Notifier,
+}
+
+impl Alerts {
+    /// Returns true when the bubble on screen changed.
+    fn receive(
+        &mut self,
+        event: notify::Event,
+        holding: bool,
+        pet: &mut Pet,
+        now: Instant,
+    ) -> bool {
+        match event {
+            notify::Event::Show(n) => {
+                let outcome = self.inbox.push(n, holding);
+                for id in outcome.discarded {
+                    self.notifier.closed(id, CloseReason::Expired);
+                }
+                if outcome.redisplay {
+                    self.show_current(pet, now);
+                }
+                outcome.redisplay
+            }
+            notify::Event::Close(id) => {
+                let on_screen = self.inbox.close(id);
+                self.notifier.closed(id, CloseReason::Closed);
+                if on_screen {
+                    self.show_current(pet, now);
+                }
+                on_screen
+            }
+        }
+    }
+
+    /// A click on a notification bubble opens it when the sender allows,
+    /// and dismisses it either way.
+    fn clicked(&mut self, id: u32, pet: &mut Pet, now: Instant) {
+        if self
+            .inbox
+            .current
+            .as_ref()
+            .is_some_and(|n| n.id == id && n.has_default_action)
+        {
+            self.notifier.invoke_default(id);
+        }
+        self.finish(id, CloseReason::Dismissed, pet, now);
+    }
+
+    fn finish(&mut self, id: u32, reason: CloseReason, pet: &mut Pet, now: Instant) {
+        if self.inbox.current.as_ref().is_some_and(|n| n.id == id) {
+            self.inbox.advance();
+        }
+        self.notifier.closed(id, reason);
+        self.show_current(pet, now);
+    }
+
+    fn show_current(&mut self, pet: &mut Pet, now: Instant) {
+        let critical = self.inbox.current.as_ref().is_some_and(|n| n.critical);
+        match (
+            self.inbox.current.as_ref().map(|n| n.id),
+            self.inbox.current_bubble(),
+        ) {
+            (Some(id), Some(bubble)) => pet.show_notification(bubble, id, critical, now),
+            _ => pet.clear_notification(),
+        }
+    }
+
+    /// After quiet mode or hiding ends, sum up what was held back.
+    fn catch_up(&mut self, pet: &mut Pet, now: Instant) {
+        if let Some((bubble, ids)) = self.inbox.take_missed() {
+            for id in ids {
+                self.notifier.closed(id, CloseReason::Expired);
+            }
+            if self.inbox.current.is_none() {
+                pet.say(bubble, true, now);
+            }
         }
     }
 }

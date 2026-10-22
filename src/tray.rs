@@ -4,6 +4,8 @@
 use std::sync::mpsc::Sender;
 
 use ksni::blocking::TrayMethods;
+
+use crate::notify;
 use tiny_skia::{Pixmap, PixmapPaint, Transform};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +18,7 @@ pub enum Command {
 
 struct NibTray {
     tx: Sender<Command>,
+    mode: Option<notify::Mode>,
     quiet: bool,
     hidden: bool,
     icons: Vec<ksni::Icon>,
@@ -53,7 +56,19 @@ impl ksni::Tray for NibTray {
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
+        let status = match self.mode {
+            Some(notify::Mode::Service) => "Notifications: shown as bubbles",
+            Some(notify::Mode::Listening) => "Notifications: bubbles (turn off desktop popups)",
+            None => "Notifications: unavailable",
+        };
         vec![
+            StandardItem {
+                label: status.into(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
             StandardItem {
                 label: "Say hi".into(),
                 activate: Box::new(|t: &mut Self| {
@@ -63,7 +78,7 @@ impl ksni::Tray for NibTray {
             }
             .into(),
             CheckmarkItem {
-                label: "Quiet mode".into(),
+                label: "Quiet mode (hold notifications)".into(),
                 checked: self.quiet,
                 activate: Box::new(|t: &mut Self| {
                     t.quiet = !t.quiet;
@@ -112,13 +127,19 @@ impl TrayHandle {
 
 /// Starts the tray on its own thread. Fails when no tray host is running;
 /// the pet still works and can be quit with a double right-click.
-pub fn spawn(tx: Sender<Command>, icon_source: &Pixmap, quiet: bool) -> Result<TrayHandle, String> {
+pub fn spawn(
+    tx: Sender<Command>,
+    icon_source: &Pixmap,
+    quiet: bool,
+    mode: Option<notify::Mode>,
+) -> Result<TrayHandle, String> {
     let icons = [22u32, 32, 48]
         .iter()
         .map(|&s| icon(icon_source, s))
         .collect();
     let tray = NibTray {
         tx,
+        mode,
         quiet,
         hidden: false,
         icons,
