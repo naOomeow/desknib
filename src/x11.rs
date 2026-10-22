@@ -9,6 +9,7 @@ use std::time::Instant;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::image::{BitsPerPixel, Image, ImageOrder, ScanlinePad};
 use x11rb::protocol::Event;
+use x11rb::protocol::screensaver;
 use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
@@ -36,12 +37,14 @@ pub enum WindowEvent {
 pub struct PetWindow {
     conn: RustConnection,
     window: Window,
+    root: Window,
     gc: Gcontext,
     width: u16,
     height: u16,
     pub position: (i32, i32),
     last_region: Vec<Rect>,
     has_shape: bool,
+    has_screensaver: bool,
     pixels: Vec<u8>,
     mapped: bool,
 }
@@ -225,16 +228,21 @@ impl PetWindow {
         let has_shape = conn
             .extension_information(shape::X11_EXTENSION_NAME)?
             .is_some();
+        let has_screensaver = conn
+            .extension_information(screensaver::X11_EXTENSION_NAME)?
+            .is_some();
 
         let mut win = PetWindow {
             conn,
             window,
+            root: screen.root,
             gc,
             width,
             height,
             position,
             last_region: Vec::new(),
             has_shape,
+            has_screensaver,
             pixels: Vec::new(),
             mapped: false,
         };
@@ -266,6 +274,19 @@ impl PetWindow {
         self.conn
             .configure_window(self.window, &ConfigureWindowAux::new().x(x).y(y))?;
         Ok(())
+    }
+
+    /// How long since the last keyboard or mouse input anywhere on the
+    /// desktop, via the MIT-SCREEN-SAVER extension. `None` when that
+    /// extension is not available (rare; some minimal X servers lack it).
+    pub fn idle_time(&self) -> Result<Option<std::time::Duration>> {
+        if !self.has_screensaver {
+            return Ok(None);
+        }
+        let info = screensaver::query_info(&self.conn, self.root)?.reply()?;
+        Ok(Some(std::time::Duration::from_millis(
+            info.ms_since_user_input.into(),
+        )))
     }
 
     /// Uploads the composed scene and updates the clickable area.
