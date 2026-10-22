@@ -67,6 +67,10 @@ stay up longer. Quiet mode holds every non-critical notification and shows
 a short summary once it ends. Notification bubbles are never shown while
 the pet is hidden.
 
+To try the "desktop keeps the service" path without a real second
+notification daemon, run `cargo run --example fake_daemon` in one terminal
+(it just grabs the name and sits there) before starting desknib in another.
+
 ## Character packs
 
 A pack is a folder with a `character.json` and one PNG strip per animation:

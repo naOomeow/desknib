@@ -152,13 +152,20 @@ pub fn start(tx: Sender<Event>) -> zbus::Result<(Mode, Notifier)> {
     let conn = connection::Builder::session()?
         .serve_at(PATH, service)?
         .build()?;
-    let reply = conn.request_name_with_flags(
+    // zbus turns a "name already owned by someone else" reply into
+    // `Err(Error::NameTaken)` instead of `Ok(RequestNameReply::Exists)`, so
+    // that case must be matched explicitly rather than propagated with `?`:
+    // it means "fall back to listening", not "notifications are broken".
+    match conn.request_name_with_flags(
         NAME,
         RequestNameFlags::ReplaceExisting | RequestNameFlags::DoNotQueue,
-    )?;
-    if reply == RequestNameReply::PrimaryOwner || reply == RequestNameReply::AlreadyOwner {
-        // zbus serves the interface on its own executor thread.
-        return Ok((Mode::Service, Notifier { conn: Some(conn) }));
+    ) {
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {
+            // zbus serves the interface on its own executor thread.
+            return Ok((Mode::Service, Notifier { conn: Some(conn) }));
+        }
+        Ok(_) | Err(zbus::Error::NameTaken) => {}
+        Err(e) => return Err(e),
     }
     drop(conn);
 
@@ -225,7 +232,58 @@ fn monitor(conn: Connection, tx: Sender<Event>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
     use zbus::zvariant::Value;
+
+    // Needs a real session bus: run under `dbus-run-session --` (CI does;
+    // locally, `dbus-run-session -- cargo test`). Skips quietly otherwise
+    // rather than failing a developer's plain `cargo test`.
+    fn has_session_bus() -> bool {
+        std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+    }
+
+    /// Both halves of `start()`'s fallback, in one test so they cannot run
+    /// concurrently and fight over who owns the name on the shared bus.
+    ///
+    /// The regression this guards: zbus turns a "name already taken" reply
+    /// into `Err(Error::NameTaken)` rather than `Ok(RequestNameReply::Exists)`,
+    /// and `start()` must treat that as "fall back to listening", not as
+    /// failure. This is the bug behind notifications silently not working
+    /// on desktops (Cinnamon among them) that run their own notification
+    /// daemon by default.
+    #[test]
+    fn start_picks_service_or_listening_depending_on_who_owns_the_name() {
+        if !has_session_bus() {
+            eprintln!("skipping: no session bus");
+            return;
+        }
+
+        let (tx, _rx) = mpsc::channel();
+        let (mode, _notifier) = start(tx).unwrap();
+        assert_eq!(mode, Mode::Service, "nothing else owns the name yet");
+
+        // Stand in for Cinnamon's own notification daemon. With DoNotQueue
+        // set, zbus itself turns the losing reply into this same
+        // Err(NameTaken) rather than Ok(RequestNameReply::Exists) - exactly
+        // the surprise start() has to handle, so this doubles as a sanity
+        // check on that behaviour.
+        let holder = connection::Builder::session().unwrap().build().unwrap();
+        let err = holder
+            .request_name_with_flags(
+                NAME,
+                RequestNameFlags::ReplaceExisting | RequestNameFlags::DoNotQueue,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, zbus::Error::NameTaken),
+            "the first start() above should still hold it: {err}"
+        );
+
+        let (tx, _rx) = mpsc::channel();
+        let (mode, _notifier) =
+            start(tx).expect("start() must not fail just because the name is taken");
+        assert_eq!(mode, Mode::Listening);
+    }
 
     fn hints(urgency: Option<u8>) -> HashMap<String, OwnedValue> {
         let mut h = HashMap::new();
